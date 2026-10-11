@@ -68,18 +68,19 @@ struct TabPill: View {
     /// of strings is measured over and over as the map animates.
     nonisolated(unsafe) private static var widthCache: [String: CGFloat] = [:]
 
-    /// Width of `s` in the pills' system font, semibold — the selected weight,
-    /// so the measure is the upper bound.
+    /// Width of `s` in the pills' system font, semibold by default — the
+    /// selected weight, so the measure is the upper bound.
     static func textWidth(_ s: String, size: CGFloat,
-                          design: NSFontDescriptor.SystemDesign = .rounded) -> CGFloat {
-        let key = "\(size)|\(design.rawValue)|\(s)"
+                          design: NSFontDescriptor.SystemDesign = .rounded,
+                          weight: NSFont.Weight = .semibold) -> CGFloat {
+        let key = "\(size)|\(design.rawValue)|\(weight.rawValue)|\(s)"
         if let w = widthCache[key] { return w }
-        let fontKey = "\(size)|\(design.rawValue)"
+        let fontKey = "\(size)|\(design.rawValue)|\(weight.rawValue)"
         let font: NSFont
         if let f = fontCache[fontKey] {
             font = f
         } else {
-            var made = NSFont.systemFont(ofSize: size, weight: .semibold)
+            var made = NSFont.systemFont(ofSize: size, weight: weight)
             if let d = made.fontDescriptor.withDesign(design) {
                 made = NSFont(descriptor: d, size: size) ?? made
             }
@@ -94,6 +95,31 @@ struct TabPill: View {
         return w
     }
 
+    /// What a full pill past the ninth needs on top of the 64pt chrome.
+    /// Without the badge the row is 67pt (padding 22, dot 6, three 7pt
+    /// gaps, close 18), 3pt more than the formula reserves. Only counted
+    /// under "Fit tabs to titles": there the selected pill gets no share
+    /// of spare width to hide the shortfall, and its title truncates
+    /// ("Terminal…").
+    static func unbadgedGap(fitting: Bool) -> CGFloat {
+        fitting ? Theme.ui(3) : 0
+    }
+
+    /// Width of a fit-to-title pill: padding, status dot, gap and title,
+    /// with no space kept for the ⌘N badge or close button. Measured at
+    /// regular weight — a fitted pill is never the selected one, so its
+    /// title never draws semibold.
+    static func fitWidth(_ title: String) -> CGFloat {
+        textWidth(title, size: Theme.ui(12), weight: .regular) + Theme.ui(36)
+    }
+
+    /// "Fit tabs to titles" applies to this pill: a labelled horizontal
+    /// pill that isn't selected. The selected pill keeps its badge and
+    /// close button inline, since both always show on it.
+    private var fitsTitle: Bool {
+        prefs.fitTabsToTitles && !mini && !compact && !isSessionCard && !isSelected
+    }
+
     /// The bar squeezed this pill below what its title needs, so the
     /// text gives way to the tab number. Display-only: the layout keeps
     /// carrying the (invisibly truncated) title, so entering number
@@ -102,8 +128,10 @@ struct TabPill: View {
     private var squeezed: Bool {
         guard !mini, !compact, !isSessionCard, pillWidth > 0 else { return false }
         let title = tab.title.isEmpty ? "shell" : tab.title
-        let needed = Self.textWidth(title, size: Theme.ui(12)) + Theme.ui(64)
-                   + (index <= 9 ? Theme.ui(41) : 0)
+        let needed = fitsTitle ? Self.fitWidth(title)
+                   : Self.textWidth(title, size: Theme.ui(12)) + Theme.ui(64)
+                     + (index <= 9 ? Theme.ui(41)
+                        : Self.unbadgedGap(fitting: prefs.fitTabsToTitles))
         return pillWidth < needed
     }
 
@@ -147,9 +175,15 @@ struct TabPill: View {
                                        size: Theme.ui(8.5), dimmed: true)
                     }
                 }
+                // A fitted pill has no trailing Spacer, so the title
+                // column is what fills the width TabBar deals it. Left to
+                // hug, the pill comes out narrower than `fitWidth` — the
+                // measure is rounded up and carries a point of slack — and
+                // `squeezed` swaps every title for its number.
+                .frame(maxWidth: fitsTitle ? .infinity : nil, alignment: .leading)
                 .opacity(squeezed ? 0 : 1)
             }
-            if !mini {
+            if !mini && !fitsTitle {
                 if compact || isSessionCard {
                     // Sidebar rows fill a fixed column width — push the
                     // trailing controls to the row's edge.
@@ -200,6 +234,20 @@ struct TabPill: View {
             }
         }
         .animation(Theme.Spring.snappy, value: squeezed)
+        // A fit-to-title pill keeps no slot for its close button, so the
+        // button shows over the pill's trailing end on hover — where the
+        // click catcher's trailing zone already routes clicks to close.
+        .overlay(alignment: .trailing) {
+            if fitsTitle && hovering && !squeezed {
+                closeButton
+                    // Opaque enough to read over the title it covers.
+                    .background(.regularMaterial, in: Circle())
+                    // Tight to the edge: the close zone below spans the
+                    // X and this margin, so the margin is kept small.
+                    .padding(.trailing, Theme.ui(2))
+                    .transition(.opacity)
+            }
+        }
         // (The selected-tab halo now travels: it's a single shared
         //  glow rendered by TabBar via matchedGeometry, so switching
         //  tabs glides the light across instead of snapping it.)
@@ -216,7 +264,9 @@ struct TabPill: View {
                 // used to start rename and fought double-click-to-zoom).
                 onSingle: onSelect,
                 onDouble: {},
-                trailingZoneWidth: (hovering && !mini) ? 24 : 0,
+                // A fitted pill's zone covers only its overlaid X (16pt
+                // circle + 2pt margin) — 24pt is over a third of a short tab.
+                trailingZoneWidth: (hovering && !mini) ? (fitsTitle ? Theme.ui(18) : 24) : 0,
                 onTrailingClick: onClose,
                 dragPayload: draggable ? TabDrag.payload(for: tab.id) : nil,
                 dragCornerRadius: Theme.pillCorner

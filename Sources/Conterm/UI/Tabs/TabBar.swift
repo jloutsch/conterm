@@ -93,40 +93,32 @@ struct TabBar: View {
         }
     }
 
-    /// Natural width of everything the bar must seat — pills at full
-    /// labels, tray tags, the measured cluster, fixed chrome. Text
-    /// widths are measured, not averaged: each pill's title plus its
-    /// fixed chrome (dot, spacing, padding, row gap = 44), the
-    /// always-reserved close slot (26), and the ⌘N badge — hidden by
-    /// opacity, not removed, so the first nine pills carry its ~40pt
-    /// footprint even at rest. A cluster measurement of 0 means the
-    /// preference hasn't landed yet, so assume a typical cluster rather
-    /// than none. The base covers the bar margins, new-tab disc, and
-    /// collapse chevron.
+    /// Natural width of everything the bar must seat — labelled pills
+    /// at `TabPill.idealWidth` plus the strip's gap after each, tray
+    /// tags, the measured cluster, fixed chrome. Full pills keep their
+    /// badge and close slot, both hidden by opacity rather than removed.
+    /// Under "Fit tabs to titles" every pill counts at its fitted width
+    /// except one, which counts full — the costliest one, not the one
+    /// selected, so whether the bar shows labels or numbers depends on
+    /// the tabs and not on which is selected. A cluster measurement of 0
+    /// means the preference hasn't landed yet, so assume a typical
+    /// cluster rather than none. The base covers the bar margins, new-tab
+    /// disc, and collapse chevron.
     private func neededWidth() -> CGFloat {
         var needed: CGFloat = 90
         needed += trailingWidth
-        // With fitted pills only the selected one is full width, and
-        // what that costs depends on the tab: a badge-carrying one needs
-        // ~40pt more than one past the ninth. Counting the pill that
-        // happens to be selected made the labels-or-numbers flip follow
-        // the selection — on a near-full bar, clicking a tab collapsed
-        // every pill, and clicking another brought the labels back. So
-        // budget for the costliest selection; the flip then depends on
-        // the tabs alone.
         var selectedExtra: CGFloat = 0
         for (i, tab) in state.tabs.enumerated() {
             let title = tab.title.isEmpty ? "shell" : tab.title
-            let full = TabPill.textWidth(title, size: Theme.ui(12)) + Theme.ui(70)
-                     + (i < 9 ? Theme.ui(40)
-                        : TabPill.unbadgedGap(fitting: prefs.fitTabsToTitles))
+            let full = TabPill.idealWidth(title: title, index: i + 1, fitted: false)
             if prefs.fitTabsToTitles {
-                let fitted = TabPill.fitWidth(title) + Theme.ui(6)
+                let fitted = TabPill.idealWidth(title: title, index: i + 1, fitted: true)
                 needed += fitted
                 selectedExtra = max(selectedExtra, full - fitted)
-                continue
+            } else {
+                needed += full
             }
-            needed += full
+            needed += Theme.ui(6)
         }
         needed += selectedExtra
         for g in tabGroups.groups
@@ -146,32 +138,28 @@ struct TabBar: View {
     /// labelled pill, all pills collapse at once to dot + number
     /// instead of truncating titles into blank slivers. Flips a touch
     /// before true exhaustion — a pill showing its number beats one
-    /// showing three letters of its title.
+    /// showing three letters of its title. Read once per body: it sums
+    /// every pill's measured width.
     private var miniPills: Bool {
         barWidth > 0 && neededWidth() > barWidth - 24
     }
 
-    /// Directory line under each pill's title. Stacked, it costs no
-    /// width — it head-truncates to the pill — so it rides along
-    /// whenever the pills are labelled at all.
-    private var showsDirMeta: Bool { !miniPills }
-
-    /// Explicit per-pill widths: the bar's free width is dealt to ALL
-    /// pills equally on top of each one's natural width, tray members
+    /// Explicit per-pill widths, starting from each pill's
+    /// `TabPill.idealWidth` (fitted or full, per `fitsTitle`). Spare
+    /// width is dealt to ALL pills equally on top, tray members
     /// included — the HStack's own distribution can't reach across the
-    /// tray boundary (a tray counts as one child, starving its pills).
-    /// Under-supply compresses proportionally instead; the per-pill
-    /// number rule and the global mini flip take over from there.
-    private var pillWidths: [UUID: CGFloat] {
-        guard barWidth > 0, !miniPills else { return [:] }
+    /// tray boundary (a tray counts as one child, starving its pills) —
+    /// except under "Fit tabs to titles", where pills keep their ideal
+    /// widths and the spare stays at the bar's end. Under-supply
+    /// compresses proportionally instead; the per-pill number rule and
+    /// the global mini flip take over from there.
+    private func pillWidths(mini: Bool) -> [UUID: CGFloat] {
+        guard barWidth > 0, !mini else { return [:] }
         var ideals: [(UUID, CGFloat)] = []
         for (i, tab) in state.tabs.enumerated() {
             let title = tab.title.isEmpty ? "shell" : tab.title
-            let w = fitsTitle(tab) ? TabPill.fitWidth(title)
-                  : TabPill.textWidth(title, size: Theme.ui(12)) + Theme.ui(64)
-                    + (i < 9 ? Theme.ui(41)
-                       : TabPill.unbadgedGap(fitting: prefs.fitTabsToTitles))
-            ideals.append((tab.id, w))
+            ideals.append((tab.id, TabPill.idealWidth(title: title, index: i + 1,
+                                                      fitted: fitsTitle(tab))))
         }
         let total = ideals.reduce(0) { $0 + $1.1 }
         var chrome: CGFloat = 90
@@ -184,8 +172,6 @@ struct TabBar: View {
         let available = barWidth - chrome
         guard total > 0, available > 0 else { return [:] }
         if available >= total {
-            // Fitted pills keep their natural widths; the spare width
-            // stays at the bar's end.
             if prefs.fitTabsToTitles {
                 return Dictionary(uniqueKeysWithValues: ideals)
             }
@@ -212,15 +198,20 @@ struct TabBar: View {
     // MARK: - Horizontal
 
     private var horizontal: some View {
-        let widths = pillWidths
+        let mini = miniPills
+        let widths = pillWidths(mini: mini)
         return HStack(spacing: Theme.ui(6)) {
             HStack(spacing: Theme.ui(6)) {
+                // The directory line under each title costs no width — it
+                // head-truncates to the pill — so it rides along whenever
+                // the pills are labelled at all.
                 ForEach(ungroupedTabs) { tab in
-                    pillCell(for: tab, draggable: true, mini: miniPills,
-                             showDir: showsDirMeta, width: widths[tab.id])
+                    pillCell(for: tab, draggable: true, mini: mini,
+                             showDir: !mini, fitted: !mini && fitsTitle(tab),
+                             width: widths[tab.id])
                 }
                 ForEach(tabGroups.groups) { group in
-                    horizontalGroupTray(group, widths: widths)
+                    horizontalGroupTray(group, mini: mini, widths: widths)
                 }
             }
             .backgroundPreferenceValue(TabSelectionFrameKey.self) { dropSelection($0) }
@@ -228,8 +219,7 @@ struct TabBar: View {
             .animation(Theme.Spring.soft, value: state.tabs.map(\.id))
             .animation(Theme.Spring.soft, value: state.tabs.map(\.groupID))
             .animation(Theme.Spring.soft, value: tabGroups.groups)
-            .animation(Theme.Spring.soft, value: miniPills)
-            .animation(Theme.Spring.soft, value: showsDirMeta)
+            .animation(Theme.Spring.soft, value: mini)
             .animation(Theme.Spring.soft, value: prefs.fitTabsToTitles)
             // The pill strip's gaps must not double as window-drag
             // handles — a near-miss on a tight pill would yank the
@@ -545,7 +535,7 @@ struct TabBar: View {
     /// stripe. The tag opens the rename/color editor; the tray accepts
     /// tab drops and carries the group's context menu.
     @ViewBuilder
-    private func horizontalGroupTray(_ group: TabGroup,
+    private func horizontalGroupTray(_ group: TabGroup, mini: Bool,
                                      widths: [UUID: CGFloat] = [:]) -> some View {
         let groupTabs = state.tabs.filter { $0.groupID == group.id }
         if !groupTabs.isEmpty {
@@ -572,7 +562,8 @@ struct TabBar: View {
                 .help("Rename / recolor group")
                 ForEach(groupTabs) { tab in
                     pillCell(for: tab, inGroupFolder: true, draggable: true,
-                             mini: miniPills, showDir: showsDirMeta,
+                             mini: mini, showDir: !mini,
+                             fitted: !mini && fitsTitle(tab),
                              width: widths[tab.id])
                 }
             }
@@ -611,8 +602,8 @@ struct TabBar: View {
             })
             // Same zero minimum as a fitted pill (see `pillCell`): a
             // tray of one short fitted pill is wide for its tag but has
-            // almost no give, so the strip sized it first and squeezed
-            // its pill to a number.
+            // almost no give, so without it the strip would size the tray
+            // first, from a share under its width.
             .frame(minWidth: prefs.fitTabsToTitles && !widths.isEmpty ? 0 : nil)
             // The tray holding the selected pill needs the same head
             // start as a bare selected pill (see `pillCell`): the strip
@@ -705,6 +696,7 @@ struct TabBar: View {
                           draggable: Bool = false,
                           mini: Bool = false,
                           showDir: Bool = false,
+                          fitted: Bool = false,
                           width: CGFloat? = nil) -> some View {
         let index = (state.tabs.firstIndex(where: { $0.id == tab.id }) ?? 0) + 1
         let selected = state.selectedID == tab.id
@@ -719,7 +711,8 @@ struct TabBar: View {
             inGroupFolder: inGroupFolder,
             draggable: draggable,
             mini: mini,
-            showDir: showDir
+            showDir: showDir,
+            fitted: fitted
         )
         // Ideal/max only, never min: a hard `frame(width:)` makes the
         // pill rigid, and the window enforces its SwiftUI content's
@@ -744,11 +737,11 @@ struct TabBar: View {
         }
         // Among fitted pills the selected one is the odd one out: the
         // widest, yet with little give, since its badge and close slot
-        // can't compress. The strip's HStack then sizes it ahead of
-        // longer-titled fitted pills, from an equal share of the bar, and
-        // on a busy bar that share is under the width it was dealt — the
-        // pill reads as squeezed and shows its number. Priority has the
-        // HStack size it first, from everything the others can spare.
+        // can't compress. Without priority the strip's HStack would size
+        // it ahead of longer-titled fitted pills, from an equal share of
+        // the bar that on a busy bar is under the width it was dealt.
+        // Priority has the HStack size it first, from everything the
+        // others can spare.
         .layoutPriority(selected && prefs.fitTabsToTitles && width != nil ? 1 : 0)
     }
 
